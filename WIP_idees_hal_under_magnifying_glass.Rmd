@@ -1,0 +1,338 @@
+---
+title: "IdéesHal sous la loupe"
+author: "S. Rey-Coyrehourcq, R. Krummeich"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+# Exploiter l'API HAL avec les métadonnées adaptées
+
+La librairie [`httr2`](https://httr2.r-lib.org/){target=_blank} permet de réaliser des requêtes API dans une syntaxe simple.
+
+L'API HAL est décrite de manière sommaire et accessible par des supports de formation. On se limite ici à identifier les champs pertinents pour construire une table de données exploitables selon les usages habituels R. A cette fin, on mobilise aussi la librarie `arrow`, et celles plus classique`dplyr` etc.
+
+## Nombre de notices HAL rattachées à l'UMR CNRS 6266 IDEES
+
+### Identifier le périmètre du laboratoire
+
+Une première étape est de trouver l'identifiant du laboratoire. Partant de la plateforme auréHAL,
+
+[https://aurehal.archives-ouvertes.fr/](https://aurehal.archives-ouvertes.fr/){target="_blank}
+
+il est possible d'effectuer des recherches. 
+Par exemple, en sélectionnant les structures, on trouve la description actuelle du laboratoire et de ses tutelles.
+
+[https://aurehal.archives-ouvertes.fr/structure/read/id/97036](https://aurehal.archives-ouvertes.fr/structure/read/id/97036){target="_blank}
+
+Le numéro de l'identifiant du laboratoire est : `97036`. Il s'agit de la première données HAL trouvée, correspondant au champ `structId_i`, défini comme *Structure: Internal structure identifier* au sein du schéma HAL, accessible en ligne :
+
+[https://api.archives-ouvertes.fr/docs/search/?schema=fields#fields](https://api.archives-ouvertes.fr/docs/search/?schema=fields#fields){target="_blank}
+
+---
+nb: il est possible d'effectuer des recherche avec une métadonnée de niveau hiérarchique supérieur, à savoir `structure_t` en mobilisant le numéro de l'UMR, `6266`, ou le nom complet `Identité et Différenciation de l’Espace, de l’Environnement et des Sociétés`. Toutefois, l'usage de l'acronyme `IDEES` conduit à de faux positifs (d'autres structures de l'ESR mobilisant le terme "idees".)
+---
+
+```{r img_stucture_t,  fig.align = 'center'}
+library(knitr)
+include_graphics("./img/structure_t.png")
+```
+
+```{r nombre}
+
+library(httr2)
+
+# Collecter les notices HAL associées à l'identifiant
+
+portail_idees <- 
+  request("https://api.archives-ouvertes.fr/search/") |> 
+  req_url_query(
+  #  q = "(structId_i:(97036))"
+    q = "(structure_t:(97036))"
+  #  q = "(structure_t:(Identité Différenciation Espace Environnement Sociétés))" # attention ! sensible à la casse
+               ) |> 
+  req_perform() |> 
+  resp_body_json()
+```
+Le nombre de notices trouvées est de **`r portail_idees$response$numFound`** avec un rattachement au laboratoire d'identifiant HAL `97036`.
+
+### Identifier les données HAL du laboratoire
+
+```{r auteurices}
+
+auteurices_idees <- request("https://api.archives-ouvertes.fr/search/") |> 
+  req_url_query(
+    q = "(structure_t:(97036))",
+#    fl = "authIdHalFullName_fs,halId_s,doiId_s,docType_s,abstract_s,fileMain_s,producedDateY_i",
+    fl = "authIdHalFullName_fs,halId_s,doiId_s,docType_s,language_s,fileMain_s,producedDateY_i",
+    rows = "5000"
+               ) |> 
+  req_perform()  |> 
+  resp_body_json()
+```
+
+```{r enregistrer, echo=FALSE, eval = TRUE, warning=FALSE}
+library("jsonlite")
+
+# collecter les documents
+
+metadata_docs <- auteurices_idees$response$docs
+
+# écrire le résultat dans un fichier au format json
+
+exportJson <- toJSON(metadata_docs,pretty = 1)
+write(exportJson, "auteurices_idees.json")
+
+# aplatir le json (script sh avec jq)
+
+system2("./convert_to_jsonlines.sh", "auteurices_idees.json")
+
+```
+Les données collectées par l'API HAL sont les suivantes :
+```{r collecte}
+library("dplyr")
+
+
+t_portail <- as_tibble(fromJSON(sprintf("[%s]", toString(readLines("output_auteurices_idees.json")))))
+
+dl <- sapply(t_portail, class) |> 
+  data.frame()
+
+colnames(dl) <- c("type de données")
+knitr::kable(dl)
+```
+
+Les données collectées sont accessibles dans la table ci-dessous :
+```{r affichage}
+library("tidyr")
+library("purrr")
+
+t_portail <- t_portail  |> mutate(across(where(is.list), map, `%||%`, NA))
+
+t_portail |> 
+  data.frame() |> 
+  DT::datatable()
+
+```
+#### Synthèse par type de document
+Sur l'ensemble des données HAL attachées à l'UMR 6266 CNRS IDEES (toutes les années), la répartition des notices publiées par type de documents est la suivantes :
+```{r type}
+# Count number of article by type 
+sum_portail <- t_portail |> 
+  group_by(docType_s) |> 
+#  summarise(total = n(), hal_filled = sum(!is.na(halId_s)), doi_not_empty = sum(!is.na(doiId_s)), abstract_not_empty = sum(!is.na(abstract_s)),file_not_empty = sum(!is.na(fileMain_s)))
+  summarise(total = n(), hal_filled = sum(!is.na(halId_s)), doi_not_empty = sum(!is.na(doiId_s)), file_not_empty = sum(!is.na(fileMain_s)), nbre_lang_fr = sum(language_s == "fr"), nbre_lang_en = sum(language_s == "en"))
+#colnames(sum_portail) <- c("Type de document","Nbre Total","Nbre d'idHal","Nbre de DOI renseignés","Nbre de résumés renseignés","Nbre de fichiers attachés")
+colnames(sum_portail) <- c("Type de document","Nbre Total","Nbre d'idHal","Nbre de DOI renseignés","Nbre de fichiers attachés","Fr","En")
+
+sum_portail |> 
+  data.frame() |> 
+  arrange(desc(Nbre.Total)) |> 
+  DT::datatable()
+```
+#### Synthèse par année
+La répatition par année des notices publiées est reportée ci-dessous :
+```{r année}
+
+# Count number of article by year
+sum_portail <- t_portail |> 
+  group_by(as.integer(producedDateY_i)) |> 
+#  summarise(total = n(), hal_filled = sum(!is.na(halId_s)), doi_not_empty = sum(!is.na(doiId_s)), abstract_not_empty = sum(!is.na(abstract_s)),file_not_empty = sum(!is.na(fileMain_s)))
+  summarise(total = n(), hal_filled = sum(!is.na(halId_s)), doi_not_empty = sum(!is.na(doiId_s)),file_not_empty = sum(!is.na(fileMain_s)), nbre_lang_fr = sum(language_s == "fr"), nbre_lang_en = sum(language_s == "en"))
+
+colnames(sum_portail) <- c("Année","Nbre Total","Nbre d'IdHal","Nbre de DOI renseignés","Nbre ayant un fichier attaché","Fr","En")
+
+sum_portail |> 
+  data.frame() |> 
+  arrange(desc(Année)) |> 
+  DT::datatable()
+
+```
+## Créer un corpus textuel [WIP]
+Il s'agit de définir un premier corpus textuel d'étude de champs thématiques émergents afin de permettre un dialogue entre les collègues des différents axes. 
+Une première étape consiste à extraite les notices HAL disposant d'un document PDF attaché, c'est à dire une `uri` dans le champ `fileMain_s`. 
+
+### Résultats pour la période 2016-2020 (précédent quadriennal)
+```{r periode1}
+
+# sélectionner la période choisie
+
+library("lubridate")
+
+sum_corpus_periode1 <- tibble(t_portail |> 
+  filter(producedDateY_i > 2015) |> 
+  filter(producedDateY_i < 2021) |>
+  group_by(as.integer(producedDateY_i)) |> 
+  summarise(nbre_total = n(), nbre_lang_fr = sum(language_s == "fr"), nbre_lang_en = sum(language_s == "en")) |> 
+  data.frame()) 
+colnames(sum_corpus_periode1) <- c("Année","Nbre total de notices HAL", "Fr","En")
+
+#kable(sum_corpus_periode1)
+
+# créer une liste limitée aux notices ayant un document attaché
+df1 <- tibble(t_portail |>
+  filter(!is.na(fileMain_s )) |> 
+  filter(producedDateY_i > 2015) |> 
+  filter(producedDateY_i < 2021))
+
+```
+
+```{r export_tsv1}
+library("arrow")
+# identifier la nature des données qui sont des listes
+
+#sapply(df,class)
+
+# transformer les données pertinentes en chaînes de caractère (on ne considère pas les résumés ici qui seront traités à part)
+dh1 <- data.frame(apply(df1[,c("authIdHalFullName_fs","language_s","halId_s","docType_s","producedDateY_i","fileMain_s","doiId_s")],2,as.character))
+
+# vérification de la nature des données du périmètre choisi
+
+#cat("Il est nécessaire de modifier les classes d'objets pour exporter les données associées à la construction du corpus de documents PDF :")
+
+#sapply(dh,class) |>
+#  data.frame()
+
+# affichage pour lecture des données auteurs (qui nécessitent un script en post-traitement pour être exploitables)
+#cat("La complexité de la donnée associée aux auteurs et autrices du document déposé sur HAL nécessite un post-traitement regex, avec par exemple :")
+#dh$authIdHalFullName_fs[3] |>
+#  data.frame()
+
+# export des données sur la période en TSV (+ post-traitement local)
+write_tsv_dataset(dh1,path = "2016_2020_umr_idees_with_document")
+
+```
+#### qualification du corpus : l'entrée PDF
+Le corpus des notices HAL pour la catégorie "articles", ayant un document attaché est résumé dans le tableau suivant :
+```{r Corpus1_pdf}
+sum_corpus <- dh1 |> 
+  group_by(as.integer(producedDateY_i)) |> 
+  summarise(total = n(), articles = sum(docType_s == "ART"), articles_FR = sum(docType_s == "ART" & language_s == "fr"), articles_EN = sum(docType_s == "ART" & language_s == "en")) |> 
+  data.frame()
+colnames(sum_corpus) <- c("Année","Nbre de notices ayant un fichier attaché","Nbre articles PDF","Nbre articles PDF FR","Nbre articles PDF EN")
+dg <- left_join(sum_corpus_periode1,sum_corpus,by = "Année", copy = FALSE)
+
+knitr::kable(dg)
+```
+
+```{r Corpus1_pdf_ART}
+
+n_art=sum(sum_corpus$`Nbre articles PDF`)
+n_art_FR=sum(sum_corpus$`Nbre articles PDF FR`)
+n_art_EN=sum(sum_corpus$`Nbre articles PDF EN`)
+n_total=sum(sum_corpus$`Nbre de notices ayant un fichier attaché`)
+n_periode=sum(sum_corpus_periode1$`Nbre total de notices HAL`)
+```
+Il y a `r n_art` documents dans la catégorie "article" dans ce corpus, dont :
+
+- `r n_art_FR` en français, 
+- et `r n_art_EN` en anglais, 
+
+soit environ `r as.integer(n_art/n_total*100)`% des identifiants HAL pour la période ayant un document attaché à la notice, 
+
+- `r as.integer(n_art_FR/n_total*100)`% en français, 
+- et `r as.integer(n_art_EN/n_total*100)`% en anglais, 
+
+
+et environ `r as.integer(n_art/n_periode*100)`% de l'ensemble des notices HAL sur la période,
+
+- `r as.integer(n_art_FR/n_periode*100)`% en français, 
+- et `r as.integer(n_art_EN/n_periode*100)`% en anglais, 
+
+
+#### qualification du corpus : les auteurs et autrices
+```{r Corpus1_auteurices}
+authors <- read.csv2("./2016_2020_umr_idees_with_document/noms_des_auteurs.csv")
+n <- nrow(authors)
+count <- data.frame(table(stack(setNames(authors, seq_along(authors)))$values))
+DT::datatable(count)
+```
+
+
+### Résultats pour la période 2021-2024 (quadriennal actuel)
+```{r periode2}
+
+# sélectionner la période choisie
+
+library("lubridate")
+
+sum_corpus_periode2 <- tibble(t_portail |>
+  group_by(as.integer(producedDateY_i)) |> 
+  filter(producedDateY_i > 2020) |>
+  summarise(nbre_total = n(), nbre_lang_fr = sum(language_s == "fr"), nbre_lang_en = sum(language_s == "en")) |> 
+  data.frame())
+colnames(sum_corpus_periode2) <- c("Année","Nbre total de notices HAL", "Fr","En")
+#kable(sum_corpus_periode2)
+
+# créer une liste limitée aux notices ayant un document attaché
+df2 <- tibble(t_portail |>
+  filter(!is.na(fileMain_s )) |> 
+  filter(producedDateY_i > 2020))
+```
+
+```{r export_tsv2}
+
+# identifier la nature des données qui sont des listes
+
+#sapply(df,class)
+
+# transformer les données pertinentes en chaînes de caractère (on ne considère pas les résumés ici qui seront traités à part)
+dh2 <- data.frame(apply(df2[,c("authIdHalFullName_fs","language_s","halId_s","docType_s","producedDateY_i","fileMain_s","doiId_s")],2,as.character))
+
+# vérification de la nature des données du périmètre choisi
+
+#sapply(dh,class) |>
+#  data.frame()
+
+# export des données sur la période en TSV (+ post-traitement local)
+write_tsv_dataset(dh2,path = "2021_2024_umr_idees_with_document")
+
+```
+
+#### qualification du corpus : l'entrée PDF 
+Le corpus des notices HAL pour la catégorie "articles", ayant un document attaché est résumé dans le tableau suivant :
+```{r Corpus2_pdf}
+sum_corpus <- dh2 |> 
+  group_by(as.integer(producedDateY_i)) |> 
+  summarise(total = n(), articles = sum(docType_s == "ART"), articles_FR = sum(docType_s == "ART" & language_s == "fr"), articles_EN = sum(docType_s == "ART" & language_s == "en")) |> 
+  data.frame()
+colnames(sum_corpus) <- c("Année","Nbre de notices ayant un fichier attaché","Nbre articles PDF","Nbre articles PDF FR","Nbre articles PDF EN")
+
+dg <- left_join(sum_corpus_periode2,sum_corpus,by = "Année", copy = FALSE)
+
+knitr::kable(dg)
+```
+
+```{r Corpus2_pdf_ART}
+n_art=sum(sum_corpus$`Nbre articles PDF`)
+n_art_FR=sum(sum_corpus$`Nbre articles PDF FR`)
+n_art_EN=sum(sum_corpus$`Nbre articles PDF EN`)
+n_total=sum(sum_corpus$`Nbre de notices ayant un fichier attaché`)
+n_periode=sum(sum_corpus_periode1$`Nbre total de notices HAL`)
+```
+Il y a `r n_art` documents dans la catégorie "article" dans ce corpus, dont :
+
+- `r n_art_FR` en français, 
+- et `r n_art_EN` en anglais, 
+
+soit environ `r as.integer(n_art/n_total*100)`% des identifiants HAL pour la période ayant un document attaché à la notice, 
+
+- `r as.integer(n_art_FR/n_total*100)`% en français, 
+- et `r as.integer(n_art_EN/n_total*100)`% en anglais, 
+
+
+et environ `r as.integer(n_art/n_periode*100)`% de l'ensemble des notices HAL sur la période,
+
+- `r as.integer(n_art_FR/n_periode*100)`% en français, 
+- et `r as.integer(n_art_EN/n_periode*100)`% en anglais, 
+
+#### qualification du corpus : les auteurs et autrices
+```{r Corpus2_auteurices}
+authors <- read.csv2("./2021_2024_umr_idees_with_document/noms_des_auteurs.csv")
+n <- nrow(authors)
+count <- data.frame(table(stack(setNames(authors, seq_along(authors)))$values))
+DT::datatable(count)
+```
